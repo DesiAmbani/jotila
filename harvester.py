@@ -55,7 +55,7 @@ def summarize_article(text):
     
     Article: {text}
     """
-    response = client.models.generate_content(model="gemini-2.5-flash", contents=prompt)
+    response = client.models.generate_content(model="gemini-3.8-flash", contents=prompt)
     output = response.text.strip().replace("**", "")
     
     category, summary = "জাতীয়", output
