@@ -1,5 +1,5 @@
 feedparser
 newspaper3k
-google-generativeai
+google-genai
 supabase
 lxml_html_clean
