@@ -1,6 +1,7 @@
 import os
 import re
 import json
+import time
 import urllib.request
 import feedparser
 from google import genai
@@ -48,16 +49,35 @@ def summarize_article(text):
     prompt = f"""
     Read the following Bengali news article. 
     1. Summarize it in exactly 50-60 words in pure Bengali. 
-    2. Assign it ONE category from this list: [খেলাধুলা, রাজনীতি, প্রযুক্তি, বিনোদন, জাতীয়, আন্তর্জাতিক].
+    2. Assign it ONE category from this list: [খেলাধুla, রাজনীতি, প্রযুক্তি, বিনোদন, জাতীয়, আন্তর্জাতিক].
     Format your response EXACTLY like this:
     Category: [category]
     Summary: [summary]
     
     Article: {text}
     """
-    response = client.models.generate_content(model="gemini-3.8-flash", contents=prompt)
-    output = response.text.strip().replace("**", "")
     
+    # Retry once on transient 503 / network spike
+    response = None
+    for attempt in range(2):
+        try:
+            response = client.models.generate_content(
+                model="gemini-3.8-flash",
+                contents=prompt
+            )
+            break
+        except Exception as e:
+            if attempt == 0:
+                print(f"Gemini busy, retrying in 3s... ({e})")
+                time.sleep(3)
+            else:
+                print(f"Gemini call failed: {e}")
+                return None, None
+
+    if not response or not response.text:
+        return None, None
+
+    output = response.text.strip().replace("**", "")
     category, summary = "জাতীয়", output
     for line in output.splitlines():
         if line.lower().startswith("category:"):
@@ -67,11 +87,18 @@ def summarize_article(text):
             
     return summary, category
 
+# Loop through feeds and process news
 for publisher, rss_url in FEEDS.items():
     feed = feedparser.parse(rss_url)
+    
+    # Skip if feed has no entries
+    if not feed.entries:
+        continue
+        
     for entry in feed.entries[:5]:
         print(f"Processing: {entry.title}")
         
+        # Check if already in database to avoid duplicates
         existing = supabase.table("news").select("id").eq("source_url", entry.link).execute()
         if existing.data:
             print("Already in database, skipping...")
@@ -83,7 +110,11 @@ for publisher, rss_url in FEEDS.items():
             continue
             
         summary, category = summarize_article(body)
+        if not summary:
+            print(f"Skipping {entry.link}: Summarization failed.")
+            continue
         
+        # Insert into Supabase
         supabase.table("news").insert({
             "title_bangla": entry.title,
             "summary_bangla": summary,
