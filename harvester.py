@@ -49,7 +49,7 @@ def summarize_article(text):
     prompt = f"""
     Read the following Bengali news article. 
     1. Summarize it in exactly 50-60 words in pure Bengali. 
-    2. Assign it ONE category from this list: [খেলাধুla, রাজনীতি, প্রযুক্তি, বিনোদন, জাতীয়, আন্তর্জাতিক].
+    2. Assign it ONE category from this list: [খেলাধুলা, রাজনীতি, প্রযুক্তি, বিনোদন, জাতীয়, আন্তর্জাতিক].
     Format your response EXACTLY like this:
     Category: [category]
     Summary: [summary]
@@ -57,22 +57,19 @@ def summarize_article(text):
     Article: {text}
     """
     
-    # Retry once on transient 503 / network spike
+    # Try 2.0-flash, fallback to flash-lite if 503 occurs
     response = None
-    for attempt in range(2):
+    for model_name in ["gemini-2.0-flash", "gemini-2.0-flash-lite"]:
         try:
             response = client.models.generate_content(
-                model="gemini-3.8-flash",
+                model=model_name,
                 contents=prompt
             )
-            break
+            if response and response.text:
+                break
         except Exception as e:
-            if attempt == 0:
-                print(f"Gemini busy, retrying in 3s... ({e})")
-                time.sleep(3)
-            else:
-                print(f"Gemini call failed: {e}")
-                return None, None
+            print(f"{model_name} unavailable: {e}")
+            time.sleep(1)
 
     if not response or not response.text:
         return None, None
@@ -86,7 +83,6 @@ def summarize_article(text):
             summary = line.split(":", 1)[1].strip()
             
     return summary, category
-
 # Loop through feeds and process news
 for publisher, rss_url in FEEDS.items():
     feed = feedparser.parse(rss_url)
@@ -123,4 +119,5 @@ for publisher, rss_url in FEEDS.items():
             "publisher_name": publisher,
             "category": category
         }).execute()
+        time.sleep(1)
         print("Successfully added to database!")
