@@ -1,29 +1,43 @@
 import os
 import feedparser
-from newspaper import Article, Config
-import google.generativeai as genai
-from supabase import create_client
 import nltk
+from newspaper import Article, Config
+from google import genai
+from supabase import create_client
 
 # Download required natural language processors for newspaper3k
-nltk.download('punkt')
-nltk.download('punkt_tab')
+nltk.download('punkt', quiet=True)
+nltk.download('punkt_tab', quiet=True)
 
-# Load keys securely from GitHub Environment Variables
-genai.configure(api_key=os.getenv("GEMINI_API_KEY"))
+# Configure Newspaper with a modern browser User-Agent
+config = Config()
+config.browser_user_agent = (
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+    "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
+)
+config.request_timeout = 15
+
+# Initialize Clients
+# genai.Client() automatically picks up GEMINI_API_KEY from environment variables
+client = genai.Client(api_key=os.getenv("GEMINI_API_KEY"))
 supabase = create_client(os.getenv("SUPABASE_URL"), os.getenv("SUPABASE_KEY"))
-gemini_model = genai.GenerativeModel('gemini-1.5-flash')
 
 # RSS Feeds for your chosen portals
 FEEDS = {
     "Prothom Alo": "https://www.prothomalo.com/feed/",
-    "The Daily Star Bangla": "https://bangla.thedailystar.net/frontpage/rss.xml"
+    "The Daily Star Bangla": "https://bangla.thedailystar.net/frontpage/rss.xml",
+    "The Daily Campus": "https://thedailycampus.com/"
 }
 
 def summarize_article(article_url):
+    # Prothom Alo video links don't have article bodies
+    if "/video/" in article_url:
+        print(f"Skipping {article_url}: Video entry, no text.")
+        return None
+
     try:
-        # Extract full text
-        article = Article(article_url)
+        # Extract full text using browser config
+        article = Article(article_url, config=config)
         article.download()
         article.parse()
         
@@ -42,7 +56,11 @@ def summarize_article(article_url):
         
         Article: {article.text}
         """
-        response = gemini_model.generate_content(prompt)
+
+        response = client.models.generate_content(
+            model="gemini-2.5-flash",
+            contents=prompt,
+        )
         
         # BULLETPROOF PARSING
         text = response.text.strip().replace("**", "") # Remove accidental bolding
@@ -52,10 +70,11 @@ def summarize_article(article_url):
         summary = text
         
         for line in text.split('\n'):
-            if "Category:" in line or "category:" in line:
-                category = line.split(":", 1)[1].strip()
-            elif "Summary:" in line or "summary:" in line:
-                summary = line.split(":", 1)[1].strip()
+            line_clean = line.strip()
+            if line_clean.lower().startswith("category:"):
+                category = line_clean.split(":", 1)[1].strip()
+            elif line_clean.lower().startswith("summary:"):
+                summary = line_clean.split(":", 1)[1].strip()
         
         return {"summary": summary, "category": category, "image": article.top_image}
     except Exception as e:
@@ -72,7 +91,7 @@ for publisher, rss_url in FEEDS.items():
         
         # Check if already in database to avoid duplicates
         existing = supabase.table("news").select("id").eq("source_url", entry.link).execute()
-        if len(existing.data) > 0:
+        if existing.data and len(existing.data) > 0:
             print("Already in database, skipping...")
             continue
             
