@@ -1,7 +1,7 @@
 import os
 import feedparser
 from newspaper import Article
-import google-generativeai as genai
+import google.generativeai as genai
 from supabase import create_client
 
 # Load keys securely from Render Environment Variables
