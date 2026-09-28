@@ -1,6 +1,6 @@
 import os
 import feedparser
-from newspaper import Article
+from newspaper import Article, Config
 import google.generativeai as genai
 from supabase import create_client
 import nltk
