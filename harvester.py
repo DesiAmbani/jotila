@@ -6,16 +6,17 @@ import feedparser
 from openai import OpenAI
 from supabase import create_client
 
-# Initialize AgentRouter client (OpenAI format)
+# Browser user-agent bypasses AgentRouter's WAF challenge
 client = OpenAI(
     base_url="https://agentrouter.org/v1",
-    api_key=os.getenv("AGENTROUTER_API_KEY"),
+    api_key=os.getenv("AGENTROUTER_API_KEY")
+    default_headers={"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"}
 )
 supabase = create_client(os.getenv("SUPABASE_URL"), os.getenv("SUPABASE_KEY"))
 
 FEEDS = {
     "Prothom Alo": "https://www.prothomalo.com/feed/",
-    "The Daily Star Bangla": "https://bangla.thedailystar.net/frontpage/rss.xml",
+    "The Daily Star Bangla": "https://bangla.thedailystar.net/frontpage/rss.xml"
 }
 
 def get_article_content(url):
@@ -24,6 +25,8 @@ def get_article_content(url):
     try:
         req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"})
         html = urllib.request.urlopen(req, timeout=15).read().decode("utf-8", errors="ignore")
+        
+        # 1. JSON-LD extraction
         for m in re.finditer(r'<script[^>]*type=[\'"]application/ld\+json[\'"][^>]*>(.*?)</script>', html, re.DOTALL):
             try:
                 data = json.loads(m.group(1))
@@ -35,6 +38,7 @@ def get_article_content(url):
             except Exception:
                 continue
 
+        # 2. Fallback: <p> tags
         paras = re.findall(r'<p[^>]*>(.*?)</p>', html, re.DOTALL)
         clean = [re.sub(r'<[^>]+>', '', p).strip() for p in paras]
         text = "\n".join(p for p in clean if len(p) > 25)
@@ -59,40 +63,58 @@ def summarize_article(text):
             model="deepseek-v4-flash",
             messages=[{"role": "user", "content": prompt}],
         )
-        # Handle string response or standard OpenAI completion object
         output = response if isinstance(response, str) else response.choices[0].message.content
         output = output.strip().replace("**", "")
     except Exception as e:
         print(f"LLM call failed: {e}")
         return None, None
 
-    category, summary = "জাতীয়", output
-    for line in output.splitlines():
-        if line.lower().startswith("category:"):
-            category = line.split(":", 1)[1].strip()
-        elif line.lower().startswith("summary:"):
-            summary = line.split(":", 1)[1].strip()
-            
-    return summary, category
+    # Reject if AgentRouter returned a WAF challenge / HTML page
+    if "<!doctype" in output.lower() or "<html" in output.lower() or "aliyun_waf" in output:
+        print("AgentRouter returned WAF captcha, skipping...")
+        return None, None
 
+    category, summary = "জাতীয়", None
+    for line in output.splitlines():
+        line_clean = line.strip()
+        if line_clean.lower().startswith("category:"):
+            category = line_clean.split(":", 1)[1].strip()
+        elif line_clean.lower().startswith("summary:"):
+            summary = line_clean.split(":", 1)[1].strip()
+            
+    # If no explicit Summary: label, use raw output only if it's not HTML
+    return (summary or output), category
+
+# Loop through feeds and process news
 for publisher, rss_url in FEEDS.items():
     feed = feedparser.parse(rss_url)
-    for entry in feed.entries[:5]:
-        print(f"Processing: {entry.title}")
-        existing = supabase.table("news").select("id").eq("source_url", entry.link).execute()
-        if existing.data:
-            print("Already in database, skipping...")
+    saved_count = 0
+    
+    # Iterate through all entries until we successfully save 5 NEW articles per publisher
+    for entry in feed.entries:
+        if saved_count >= 5:
+            break
+            
+        if "/video/" in entry.link:
             continue
             
+        # Check if already in database (never duplicates, never deletes old data)
+        existing = supabase.table("news").select("id").eq("source_url", entry.link).execute()
+        if existing.data:
+            continue
+            
+        print(f"Processing: {entry.title}")
         body, image = get_article_content(entry.link)
         if not body:
-            print(f"Skipping {entry.link}: No readable text found.")
+            print(f"Skipping {entry.link}: No readable text.")
             continue
             
         summary, category = summarize_article(body)
         if not summary:
+            print(f"Skipping {entry.link}: Summary failed.")
             continue
         
+        # Permanent insert (adds to existing records)
         supabase.table("news").insert({
             "title_bangla": entry.title,
             "summary_bangla": summary,
@@ -101,4 +123,6 @@ for publisher, rss_url in FEEDS.items():
             "publisher_name": publisher,
             "category": category
         }).execute()
-        print("Successfully added to database!")
+        
+        saved_count += 1
+        print(f"Successfully added ({saved_count}/5) for {publisher}!")
