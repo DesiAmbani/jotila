@@ -16,7 +16,7 @@ supabase = create_client(os.getenv("SUPABASE_URL"), os.getenv("SUPABASE_KEY"))
 
 FEEDS = {
     "Prothom Alo": "https://www.prothomalo.com/feed/",
-    "The Daily Star Bangla": "https://bangla.thedailystar.net/frontpage/rss.xml"
+    "The Daily Star Bangla": "https://bangla.thedailystar.net/"
 }
 
 def get_article_content(url):
