@@ -59,7 +59,9 @@ def summarize_article(text):
             model="deepseek-v4-flash",
             messages=[{"role": "user", "content": prompt}],
         )
-        output = response.choices[0].message.content.strip().replace("**", "")
+        # Handle string response or standard OpenAI completion object
+        output = response if isinstance(response, str) else response.choices[0].message.content
+        output = output.strip().replace("**", "")
     except Exception as e:
         print(f"LLM call failed: {e}")
         return None, None
