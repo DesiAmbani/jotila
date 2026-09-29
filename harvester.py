@@ -57,15 +57,27 @@ def summarize_article(text):
     
     Article: {text}
     """
-    try:
-        response = client.chat.completions.create(
-            model="deepseek/deepseek-v4.1-flash:free",
-            messages=[{"role": "user", "content": prompt}],
-        )
-        output = response if isinstance(response, str) else response.choices[0].message.content
-        output = output.strip().replace("**", "")
-    except Exception as e:
-        print(f"LLM call failed: {e}")
+    models = [
+        "deepseek/deepseek-v4-flash",
+        "deepseek/deepseek-chat-v3.1",
+        "deepseek/deepseek-v3.2"
+    ]
+    
+    output = None
+    for m in models:
+        try:
+            response = client.chat.completions.create(
+                model=m,
+                messages=[{"role": "user", "content": prompt}],
+            )
+            raw = response if isinstance(response, str) else response.choices[0].message.content
+            output = raw.strip().replace("**", "")
+            break
+        except Exception as e:
+            print(f"{m} failed: {e}")
+            continue
+
+    if not output:
         return None, None
 
     # Reject if AgentRouter returned a WAF challenge / HTML page
