@@ -9,7 +9,7 @@ from supabase import create_client
 # Browser user-agent bypasses AgentRouter's WAF challenge
 client = OpenAI(
     base_url="https://agentrouter.org/v1",
-    api_key=os.getenv("AGENTROUTER_API_KEY")
+    api_key=os.getenv("AGENTROUTER_API_KEY"),
     default_headers={"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"}
 )
 supabase = create_client(os.getenv("SUPABASE_URL"), os.getenv("SUPABASE_KEY"))
