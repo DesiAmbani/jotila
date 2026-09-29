@@ -1,30 +1,29 @@
 import os
 import re
 import json
-import time
 import urllib.request
 import feedparser
-from google import genai
+from openai import OpenAI
 from supabase import create_client
 
-client = genai.Client(api_key=os.getenv("GEMINI_API_KEY"))
+# Initialize AgentRouter client (OpenAI format)
+client = OpenAI(
+    base_url="https://agentrouter.org/v1",
+    api_key=os.getenv("AGENTROUTER_API_KEY"),
+)
 supabase = create_client(os.getenv("SUPABASE_URL"), os.getenv("SUPABASE_KEY"))
 
 FEEDS = {
     "Prothom Alo": "https://www.prothomalo.com/feed/",
     "The Daily Star Bangla": "https://bangla.thedailystar.net/frontpage/rss.xml",
-    "The Daily Campus": "https://thedailycampus.com/"
 }
 
 def get_article_content(url):
-    """Extracts text and image using JSON-LD metadata or fallback <p> tags."""
     if "/video/" in url:
         return None, None
     try:
         req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"})
         html = urllib.request.urlopen(req, timeout=15).read().decode("utf-8", errors="ignore")
-        
-        # 1. Stdlib JSON-LD extraction (Prothom Alo & standard publishers)
         for m in re.finditer(r'<script[^>]*type=[\'"]application/ld\+json[\'"][^>]*>(.*?)</script>', html, re.DOTALL):
             try:
                 data = json.loads(m.group(1))
@@ -36,10 +35,9 @@ def get_article_content(url):
             except Exception:
                 continue
 
-        # 2. Fallback: join paragraph tags
         paras = re.findall(r'<p[^>]*>(.*?)</p>', html, re.DOTALL)
-        clean_paras = [re.sub(r'<[^>]+>', '', p).strip() for p in paras]
-        text = "\n".join(p for p in clean_paras if len(p) > 25)
+        clean = [re.sub(r'<[^>]+>', '', p).strip() for p in paras]
+        text = "\n".join(p for p in clean if len(p) > 25)
         return (text, None) if len(text) >= 100 else (None, None)
     except Exception as e:
         print(f"Fetch failed for {url}: {e}")
@@ -56,25 +54,16 @@ def summarize_article(text):
     
     Article: {text}
     """
-    
-    # Try 2.0-flash, fallback to flash-lite if 503 occurs
-    response = None
-    for model_name in ["gemini-2.0-flash", "gemini-2.0-flash-lite"]:
-        try:
-            response = client.models.generate_content(
-                model=model_name,
-                contents=prompt
-            )
-            if response and response.text:
-                break
-        except Exception as e:
-            print(f"{model_name} unavailable: {e}")
-            time.sleep(1)
-
-    if not response or not response.text:
+    try:
+        response = client.chat.completions.create(
+            model="deepseek-v4-flash",
+            messages=[{"role": "user", "content": prompt}],
+        )
+        output = response.choices[0].message.content.strip().replace("**", "")
+    except Exception as e:
+        print(f"LLM call failed: {e}")
         return None, None
 
-    output = response.text.strip().replace("**", "")
     category, summary = "জাতীয়", output
     for line in output.splitlines():
         if line.lower().startswith("category:"):
@@ -83,18 +72,11 @@ def summarize_article(text):
             summary = line.split(":", 1)[1].strip()
             
     return summary, category
-# Loop through feeds and process news
+
 for publisher, rss_url in FEEDS.items():
     feed = feedparser.parse(rss_url)
-    
-    # Skip if feed has no entries
-    if not feed.entries:
-        continue
-        
     for entry in feed.entries[:5]:
         print(f"Processing: {entry.title}")
-        
-        # Check if already in database to avoid duplicates
         existing = supabase.table("news").select("id").eq("source_url", entry.link).execute()
         if existing.data:
             print("Already in database, skipping...")
@@ -107,10 +89,8 @@ for publisher, rss_url in FEEDS.items():
             
         summary, category = summarize_article(body)
         if not summary:
-            print(f"Skipping {entry.link}: Summarization failed.")
             continue
         
-        # Insert into Supabase
         supabase.table("news").insert({
             "title_bangla": entry.title,
             "summary_bangla": summary,
@@ -119,5 +99,4 @@ for publisher, rss_url in FEEDS.items():
             "publisher_name": publisher,
             "category": category
         }).execute()
-        time.sleep(1)
         print("Successfully added to database!")
