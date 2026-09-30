@@ -8,8 +8,8 @@ from supabase import create_client
 
 # Browser user-agent bypasses AgentRouter's WAF challenge
 client = OpenAI(
-    base_url="https://api.xkiro.com/v1",
-    api_key=os.getenv("XKIRO_API_KEY"),
+    base_url="https://openrouter.ai/api/v1",
+    api_key=os.getenv("OPENROUTER_API_KEY"),
 )
 supabase = create_client(os.getenv("SUPABASE_URL"), os.getenv("SUPABASE_KEY"))
 
@@ -49,7 +49,7 @@ def get_article_content(url):
 def summarize_article(text):
     prompt = f"""
     Read the following Bengali news article. 
-    1. Summarize it in exactly 50-60 words in pure Bengali. 
+    1. Summarize it in exactly 100-120 words in pure Bengali. 
     2. Assign it ONE category from this list: [খেলাধুলা, রাজনীতি, প্রযুক্তি, বিনোদন, জাতীয়, আন্তর্জাতিক].
     Format your response EXACTLY like this:
     Category: [category]
@@ -57,32 +57,15 @@ def summarize_article(text):
     
     Article: {text}
     """
-    models = [
-        "deepseek/deepseek-v4-flash",
-        "deepseek/deepseek-chat-v3.1",
-        "deepseek/deepseek-v3.2"
-    ]
-    
-    output = None
-    for m in models:
-        try:
-            response = client.chat.completions.create(
-                model=m,
-                messages=[{"role": "user", "content": prompt}],
-            )
-            raw = response if isinstance(response, str) else response.choices[0].message.content
-            output = raw.strip().replace("**", "")
-            break
-        except Exception as e:
-            print(f"{m} failed: {e}")
-            continue
-
-    if not output:
-        return None, None
-
-    # Reject if AgentRouter returned a WAF challenge / HTML page
-    if "<!doctype" in output.lower() or "<html" in output.lower() or "aliyun_waf" in output:
-        print("AgentRouter returned WAF captcha, skipping...")
+    try:
+        response = client.chat.completions.create(
+            model="nvidia/nemotron-3-ultra-550b-a55b:free",
+            messages=[{"role": "user", "content": prompt}],
+        )
+        raw = response if isinstance(response, str) else response.choices[0].message.content
+        output = raw.strip().replace("**", "")
+    except Exception as e:
+        print(f"LLM call failed: {e}")
         return None, None
 
     category, summary = "জাতীয়", None
@@ -93,7 +76,6 @@ def summarize_article(text):
         elif line_clean.lower().startswith("summary:"):
             summary = line_clean.split(":", 1)[1].strip()
             
-    # If no explicit Summary: label, use raw output only if it's not HTML
     return (summary or output), category
 
 # Loop through feeds and process news
