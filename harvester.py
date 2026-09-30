@@ -18,7 +18,7 @@ FEEDS = {
     "The Daily Campus": "https://thedailycampus.com/"
 }
 
-LIMIT_PER_SITE = 10  # Up to 10 new articles per portal (up to 30 total per run)
+LIMIT_PER_SITE = 10  # Up to 10 new articles per portal (up to 30 per run)
 
 def get_source_items(publisher, url):
     """Fetches list of articles from RSS feeds or homepage directly for The Daily Campus."""
@@ -30,7 +30,7 @@ def get_source_items(publisher, url):
             paths = list(dict.fromkeys(re.findall(r'href=[\'"](?:https://thedailycampus\.com)?/([a-zA-Z0-9_\-]+/\d+)[\'"]', html)))
             return [{"title": None, "link": f"https://thedailycampus.com/{p}"} for p in paths]
         except Exception as e:
-            print(f"Error fetching The Daily Campus: {e}")
+            print(f"Error fetching {publisher}: {e}")
             return []
     else:
         feed = feedparser.parse(url)
@@ -43,7 +43,7 @@ def get_article_content(url, default_title=None):
         req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"})
         html = urllib.request.urlopen(req, timeout=15).read().decode("utf-8", errors="ignore")
         
-        # Extract title from <h1> if not present in feed
+        # Extract title from <h1> if missing from feed
         title = default_title
         if not title:
             h1_match = re.search(r'<h1[^>]*>(.*?)</h1>', html, re.DOTALL)
@@ -87,8 +87,13 @@ def summarize_article(text):
             model="nvidia/nemotron-3-ultra-550b-a55b:free",
             messages=[{"role": "user", "content": prompt}],
         )
-        raw = response if isinstance(response, str) else response.choices[0].message.content
-        output = raw.strip().replace("**", "")
+        
+        # Safe extraction against NoneType / empty choices
+        choices = getattr(response, "choices", None)
+        if not choices or not choices[0].message.content:
+            return None, None
+            
+        output = choices[0].message.content.strip().replace("**", "")
     except Exception as e:
         print(f"LLM call failed: {e}")
         return None, None
@@ -117,7 +122,7 @@ for publisher, source_url in FEEDS.items():
         if "/video/" in link:
             continue
             
-        # Check if already saved in Supabase
+        # Check 1: Skip if already in database (saves time & LLM calls)
         existing = supabase.table("news").select("id").eq("source_url", link).execute()
         if existing.data:
             continue
@@ -129,10 +134,10 @@ for publisher, source_url in FEEDS.items():
         print(f"Processing: {title[:60]}...")
         summary, category = summarize_article(body)
         if not summary:
-            print(f"Skipping: Summarization failed.")
+            print("Skipping: Summarization failed.")
             continue
         
-        # Permanent upsert (ignores duplicates, keeps all history)
+        # Check 2: Database upsert (permanent insert, ignores any duplicates)
         try:
             supabase.table("news").upsert({
                 "title_bangla": title,
