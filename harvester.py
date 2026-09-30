@@ -6,7 +6,6 @@ import feedparser
 from openai import OpenAI
 from supabase import create_client
 
-# Browser user-agent bypasses AgentRouter's WAF challenge
 client = OpenAI(
     base_url="https://openrouter.ai/api/v1",
     api_key=os.getenv("OPENROUTER_API_KEY"),
@@ -15,16 +14,42 @@ supabase = create_client(os.getenv("SUPABASE_URL"), os.getenv("SUPABASE_KEY"))
 
 FEEDS = {
     "Prothom Alo": "https://www.prothomalo.com/feed/",
-    "The Daily Star Bangla": "https://bangla.thedailystar.net/"
+    "The Daily Star Bangla": "https://bangla.thedailystar.net/rss.xml",
+    "The Daily Campus": "https://thedailycampus.com/"
 }
 
-def get_article_content(url):
+LIMIT_PER_SITE = 10  # Up to 10 new articles per portal (up to 30 total per run)
+
+def get_source_items(publisher, url):
+    """Fetches list of articles from RSS feeds or homepage directly for The Daily Campus."""
+    headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"}
+    if "thedailycampus.com" in url:
+        try:
+            req = urllib.request.Request(url, headers=headers)
+            html = urllib.request.urlopen(req, timeout=10).read().decode("utf-8", errors="ignore")
+            paths = list(dict.fromkeys(re.findall(r'href=[\'"](?:https://thedailycampus\.com)?/([a-zA-Z0-9_\-]+/\d+)[\'"]', html)))
+            return [{"title": None, "link": f"https://thedailycampus.com/{p}"} for p in paths]
+        except Exception as e:
+            print(f"Error fetching The Daily Campus: {e}")
+            return []
+    else:
+        feed = feedparser.parse(url)
+        return [{"title": getattr(e, "title", None), "link": e.link} for e in feed.entries]
+
+def get_article_content(url, default_title=None):
     if "/video/" in url:
-        return None, None
+        return None, None, None
     try:
         req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"})
         html = urllib.request.urlopen(req, timeout=15).read().decode("utf-8", errors="ignore")
         
+        # Extract title from <h1> if not present in feed
+        title = default_title
+        if not title:
+            h1_match = re.search(r'<h1[^>]*>(.*?)</h1>', html, re.DOTALL)
+            if h1_match:
+                title = re.sub(r'<[^>]+>', '', h1_match.group(1)).strip()
+
         # 1. JSON-LD extraction
         for m in re.finditer(r'<script[^>]*type=[\'"]application/ld\+json[\'"][^>]*>(.*?)</script>', html, re.DOTALL):
             try:
@@ -33,7 +58,7 @@ def get_article_content(url):
                 if isinstance(data, dict) and "articleBody" in data:
                     img = data.get("image")
                     img_url = img.get("url") if isinstance(img, dict) else (img[0] if isinstance(img, list) else img)
-                    return data["articleBody"], img_url
+                    return title, data["articleBody"], img_url
             except Exception:
                 continue
 
@@ -41,10 +66,10 @@ def get_article_content(url):
         paras = re.findall(r'<p[^>]*>(.*?)</p>', html, re.DOTALL)
         clean = [re.sub(r'<[^>]+>', '', p).strip() for p in paras]
         text = "\n".join(p for p in clean if len(p) > 25)
-        return (text, None) if len(text) >= 100 else (None, None)
+        return (title, text, None) if len(text) >= 100 else (None, None, None)
     except Exception as e:
         print(f"Fetch failed for {url}: {e}")
-        return None, None
+        return None, None, None
 
 def summarize_article(text):
     prompt = f"""
@@ -78,44 +103,47 @@ def summarize_article(text):
             
     return (summary or output), category
 
-# Loop through feeds and process news
-for publisher, rss_url in FEEDS.items():
-    feed = feedparser.parse(rss_url)
+# Process each portal
+for publisher, source_url in FEEDS.items():
+    print(f"\n--- Checking {publisher} ---")
+    items = get_source_items(publisher, source_url)
     saved_count = 0
     
-    # Iterate through all entries until we successfully save 5 NEW articles per publisher
-    for entry in feed.entries:
-        if saved_count >= 5:
+    for item in items:
+        if saved_count >= LIMIT_PER_SITE:
             break
             
-        if "/video/" in entry.link:
+        link = item["link"]
+        if "/video/" in link:
             continue
             
-        # Check if already in database (never duplicates, never deletes old data)
-        existing = supabase.table("news").select("id").eq("source_url", entry.link).execute()
+        # Check if already saved in Supabase
+        existing = supabase.table("news").select("id").eq("source_url", link).execute()
         if existing.data:
             continue
             
-        print(f"Processing: {entry.title}")
-        body, image = get_article_content(entry.link)
-        if not body:
-            print(f"Skipping {entry.link}: No readable text.")
+        title, body, image = get_article_content(link, item["title"])
+        if not body or not title:
             continue
             
+        print(f"Processing: {title[:60]}...")
         summary, category = summarize_article(body)
         if not summary:
-            print(f"Skipping {entry.link}: Summary failed.")
+            print(f"Skipping: Summarization failed.")
             continue
         
-        # Permanent insert (adds to existing records)
-        supabase.table("news").insert({
-            "title_bangla": entry.title,
-            "summary_bangla": summary,
-            "image_url": image,
-            "source_url": entry.link,
-            "publisher_name": publisher,
-            "category": category
-        }).execute()
-        
-        saved_count += 1
-        print(f"Successfully added ({saved_count}/5) for {publisher}!")
+        # Permanent upsert (ignores duplicates, keeps all history)
+        try:
+            supabase.table("news").upsert({
+                "title_bangla": title,
+                "summary_bangla": summary,
+                "image_url": image,
+                "source_url": link,
+                "publisher_name": publisher,
+                "category": category
+            }, on_conflict="source_url", ignore_duplicates=True).execute()
+            
+            saved_count += 1
+            print(f"[{saved_count}/{LIMIT_PER_SITE}] Saved for {publisher}!")
+        except Exception as e:
+            print(f"Save error: {e}")
